@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="MainScene" extends="Scene">
+  <children>
+    <Label id="path" translation="[60,60]" width="1800" height="50" horizAlign="left" text="/" />
+    <!-- Left: folders -->
+    <LabelList
+      id="folders"
+      translation="[60,120]"
+      itemSize="[420,60]"
+      numRows="12"
+      focusable="true" />
+    <!-- Right: files grid (4x3 ish), ~10px right margin preserved -->
+    <MarkupGrid
+      id="filesGrid"
+      translation="[530,120]"
+      itemComponentName="TextTile"
+      itemSize="[440,450]"
+      numColumns="3"
+      numRows="2"
+      itemSpacing="[10,10]"
+      focusable="true" />
+    <!-- Transparent focusable overlay so Scene captures OK/FF/RW/etc -->
+    <Rectangle id="keyCatcher"
+               visible="false"
+               focusable="true"
+               translation="[0,0]"
+               width="1920" height="1080"
+               color="#00000000" />
+  </children>
+  <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
+</component>
+

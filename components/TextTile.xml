@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="TextTile" extends="Group">
+  <interface>
+    <field id="itemContent" type="node" onChange="onItemContent" />
+    <field id="focused" type="boolean" onChange="onFocusedChanged" />
+  </interface>
+  <children>
+    <!-- Poster image -->
+    <Poster id="img"
+            width="440" height="350"
+            loadDisplayMode="scaleToFit" />
+    <!-- Caption under the card: -->
+    <Label id="lbl"
+           translation="[0,380]"
+           width="440" height="100"
+           font="font:SmallSystemFont"
+           horizAlign="center" vertAlign="top"
+           wrap="true" text="-" />
+    <!-- Focus highlight -->
+    <Rectangle id="focus"
+               width="330" height="300"
+               color="#FFFFFF22" visible="false" />
+  </children>
+  <script type="text/brightscript" uri="pkg:/components/TextTile.brs" />
+</component>
