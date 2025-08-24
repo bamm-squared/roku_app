@@ -1,17 +1,19 @@
+' MainScene.brs — two-pane UI + posters + non-blocking PIN unlock + autoplay + key mapping
+' Adds: Idle watchdog (auto-pause, then auto-exit), server Settings dialog auto-prompt on failure
+
 '========================
 ' Lifecycle
 '========================
 sub init()
   ' ==== Load server URL (no trailing slash) ====
-  ' If the server is on a different address, app will prompt on start
   m.server = regLoadServer()
-  if m.server = "" then m.server = "http://192.168.1.100:8008"
+  if m.server = "" then m.server = "http://192.168.10.64:8008"
 
   ' SceneGraph nodes
   m.lbl        = m.top.findNode("path")
   m.folders    = m.top.findNode("folders")
   m.filesGrid  = m.top.findNode("filesGrid")
-  m.keyCatcher = m.top.findNode("keyCatcher")
+  m.keyCatcher = m.top.findNode("keyCatcher") ' optional overlay; ok if invalid
 
   ' App state
   m.stack           = CreateObject("roArray", 0, true) ' [{id,name}]
@@ -33,6 +35,11 @@ sub init()
   ' Non-blocking Settings dialog state
   m.settingsDialog = invalid
   m.settingsOpen   = false
+
+  ' Inactivity thresholds (seconds)
+  m.idlePauseSecs = 7200   ' 2 hours to auto-pause
+  m.idleExitSecs  = 60   ' 60 seconds after auto-pause → exit
+  createIdleTimers()
 
   ' Observers
   m.folders.ObserveField("itemSelected", "onFolderSelect")
@@ -106,7 +113,7 @@ sub onBrowseResponse()
     return
   end if
 
-  ' restricted folder: show non-blocking PIN dialog and return ---
+  ' --- restricted folder: show non-blocking PIN dialog and return ---
   if j.DoesExist("authorized") and j.authorized = false then
     if m.keyCatcher <> invalid then m.keyCatcher.visible = false
     m.top.setFocus(true)
@@ -153,7 +160,6 @@ sub onBrowseResponse()
   rebuildAlphaIndex()
   m.folders.setFocus(true)
 end sub
-
 
 '========================
 ' Normalize server JSON
@@ -300,7 +306,7 @@ sub onFolderSelect()
     return
   end if
 
-  ' No Settings special case anymore — just browse into folders
+  ' Just browse into folders
   browseInto(it.id, it.title)
 end sub
 
@@ -327,11 +333,13 @@ end sub
 '========================
 function onKeyEvent(key as String, press as Boolean) as Boolean
   if not press then return false
+  noteUserActivity() ' <-- any key press counts as activity during playback
   k = LCase(key)
 
   ' During playback, intercept keys so grid doesn’t move
   if m.video <> invalid then
     if k = "back" then
+      stopIdleTimers()
       m.video.control = "stop"
       m.video.visible = false
       if m.video.Lookup("close") <> invalid then m.video.close = true
@@ -344,8 +352,11 @@ function onKeyEvent(key as String, press as Boolean) as Boolean
       s = m.video.state
       if s = "playing" then
         m.video.control = "pause"
+        m.idlePauseTimer.control = "stop" ' no countdown while paused
+        m.idleExitTimer.control  = "stop"
       else if s = "paused" then
         m.video.control = "resume"
+        resetIdleTimers()
       end if
       return true
 
@@ -444,7 +455,7 @@ function confirmExit() as Boolean
     wait(0, p)
     if d.buttonSelected <> invalid then
       if d.buttonSelected = 1 then
-        m.top.close = true
+        m.top.exit = true
         return true
       else
         d.close = true
@@ -484,7 +495,6 @@ sub showPinDialog(dirId as Integer)
   kd.message       = "Enter PIN"
   kd.buttons       = ["OK","Cancel"]
   kd.obscureText   = true
-  kd.maxTextLength = 12
   if kd.Lookup("keyboardMode") <> invalid then kd.keyboardMode = "number"
   kd.text = ""
   m.top.AppendChild(kd)
@@ -577,9 +587,7 @@ sub showServerDialog(autoLaunch as Boolean)
   end if
   d.buttons = ["OK","Cancel"]
   d.text    = m.server  ' prefill current
-
-  ' NOTE: do NOT set d.maxTextLength here — not present on some firmware
-  ' If you ever want it and your device supports it, you can add it back.
+  ' do NOT set d.maxTextLength (not available on all firmware)
 
   m.top.AppendChild(d)
   d.setFocus(true)
@@ -699,15 +707,25 @@ sub playVideo(mediaId as Dynamic, title as Dynamic)
     m.keyCatcher.setFocus(true)
   end if
   m.top.setFocus(true)
+
+  ' Start inactivity timers on playback start
+  startIdleTimers()
 end sub
 
 sub onVideoState()
   if m.video = invalid then return
   s = m.video.state
 
+  if s = "playing" then
+    ' reset timers on first transition to playing (or after resume)
+    resetIdleTimers()
+  end if
+
   if s = "finished" then
     nextItem = getNextAlpha(m.currentMediaKey)
     if nextItem <> invalid then
+      ' stop current timers, start fresh for next video inside playVideo()
+      stopIdleTimers()
       m.video.control = "stop"
       m.video.visible = false
       if m.video.Lookup("close") <> invalid then m.video.close = true
@@ -719,6 +737,7 @@ sub onVideoState()
   end if
 
   if s = "finished" or s = "error" then
+    stopIdleTimers()
     m.video.control = "stop"
     m.video.visible = false
     if m.video.Lookup("close") <> invalid then m.video.close = true
@@ -736,6 +755,87 @@ sub onVideoError()
   if m.lbl <> invalid then
     m.lbl.text = "Video error " + toQuery(ec) + ": " + toQuery(em)
   end if
+end sub
+
+'========================
+' Idle watchdog timers
+'========================
+sub createIdleTimers()
+  m.idlePauseTimer = CreateObject("roSGNode", "Timer")
+  m.idlePauseTimer.duration = m.idlePauseSecs
+  m.idlePauseTimer.ObserveField("fire", "onIdlePause")
+  m.top.AppendChild(m.idlePauseTimer)
+
+  m.idleExitTimer = CreateObject("roSGNode", "Timer")
+  m.idleExitTimer.duration = m.idleExitSecs
+  m.idleExitTimer.ObserveField("fire", "onIdleExit")
+  m.top.AppendChild(m.idleExitTimer)
+end sub
+
+sub startIdleTimers()
+  if m.video = invalid then return
+  if m.video.state <> "playing" then return
+  m.idleExitTimer.control = "stop"
+  m.idlePauseTimer.duration = m.idlePauseSecs
+  m.idlePauseTimer.control = "start"
+end sub
+
+sub stopIdleTimers()
+  if m.idlePauseTimer <> invalid then m.idlePauseTimer.control = "stop"
+  if m.idleExitTimer  <> invalid then m.idleExitTimer.control  = "stop"
+end sub
+
+sub resetIdleTimers()
+  if m.video <> invalid and m.video.state = "playing" then
+    m.idleExitTimer.control = "stop"
+    m.idlePauseTimer.duration = m.idlePauseSecs
+    m.idlePauseTimer.control = "start"
+  else
+    stopIdleTimers()
+  end if
+end sub
+
+sub noteUserActivity()
+  ' Any key press counts as activity; only relevant during playback
+  if m.video <> invalid then
+    ' If we were paused due to inactivity, kill the exit timer
+    m.idleExitTimer.control = "stop"
+    ' If currently playing, keep pause timer alive
+    if m.video.state = "playing" then
+      m.idlePauseTimer.duration = m.idlePauseSecs
+      m.idlePauseTimer.control = "start"
+    else
+      ' Paused or stopped: no countdowns (until resume)
+      m.idlePauseTimer.control = "stop"
+    end if
+  end if
+end sub
+
+sub onIdlePause()
+  ' Auto-pause only if still playing and no input reset
+  if m.video <> invalid and m.video.state = "playing" then
+    m.video.control = "pause"
+    ' Start the exit countdown after auto-pause
+    m.idleExitTimer.duration = m.idleExitSecs
+    m.idleExitTimer.control = "start"
+    if m.lbl <> invalid then m.lbl.text = "Paused for inactivity"
+  end if
+end sub
+
+sub onIdleExit()
+  ' Close the channel (Roku returns to Home)
+  stopIdleTimers()
+  m.video.control = "stop"
+  m.video.visible = false
+  if m.video.Lookup("close") <> invalid then m.video.close = true
+  m.video = invalid
+  if m.keyCatcher <> invalid then m.keyCatcher.visible = false
+  if m.filesGrid <> invalid then m.filesGrid.setFocus(true)
+end sub
+
+sub signalExit()
+  ' Tell main.brs to close the channel
+  if m.top.Lookup("exit") <> invalid then m.top.exit = true
 end sub
 
 '========================
@@ -812,7 +912,7 @@ function getNextAlpha(currKey as String) as Dynamic
 end function
 
 '========================
-' Helpers for poster URLs
+' Helpers for poster URLs & strings
 '========================
 function ms_stripExt(s as Dynamic) as String
   if s = invalid then return ""
@@ -854,7 +954,7 @@ function ms_hex2(n as Integer) as String
   return Mid(digits, hi + 1, 1) + Mid(digits, lo + 1, 1)
 end function
 
-' safe trim (spaces, tabs, CR, LF) without using Trim()
+' safe trim without using Trim() (spaces, tabs, CR, LF)
 function ms_trim_str(s as String) as String
   if s = invalid then return ""
   left = 1
@@ -874,4 +974,3 @@ function ms_trim_str(s as String) as String
   if right < left then return ""
   return Mid(s, left, right - left + 1)
 end function
-
