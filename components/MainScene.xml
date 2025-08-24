@@ -27,6 +27,9 @@
                width="1920" height="1080"
                color="#00000000" />
   </children>
+  <interface>
+    <field id="exit" type="boolean" value="false" />
+  </interface>
   <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
 </component>
 
